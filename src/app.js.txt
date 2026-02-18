@@ -1,0 +1,460 @@
+import { useState, useEffect, useCallback } from "react";
+
+const ROLES = { ADMIN: "admin", WORKER: "worker" };
+const ABSENCE_TYPES = ["Vacaciones", "Baja médica", "Asunto personal", "Otro"];
+
+const DEMO_USERS = [
+  { id: "1", name: "Admin", email: "admin@empresa.com", password: "admin123", role: ROLES.ADMIN },
+  { id: "2", name: "Carlos García", email: "carlos@empresa.com", password: "1234", role: ROLES.WORKER },
+  { id: "3", name: "Laura Martínez", email: "laura@empresa.com", password: "1234", role: ROLES.WORKER },
+  { id: "4", name: "Pedro Sánchez", email: "pedro@empresa.com", password: "1234", role: ROLES.WORKER },
+];
+
+const fmtTime = (iso) => iso ? new Date(iso).toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" }) : "--:--";
+const fmtDate = (iso) => iso ? new Date(iso).toLocaleDateString("es-ES") : "-";
+const fmtHours = (ms) => {
+  if (!ms || ms < 0) return "0h 0m";
+  const h = Math.floor(ms / 3600000), m = Math.floor((ms % 3600000) / 60000);
+  return `${h}h ${m}m`;
+};
+const todayStr = () => new Date().toISOString().split("T")[0];
+
+// Almacenamiento usando localStorage (funciona en producción)
+function useStorage(key, init) {
+  const [val, setVal] = useState(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored ? JSON.parse(stored) : init;
+    } catch { return init; }
+  });
+
+  const save = useCallback((v) => {
+    const next = typeof v === "function" ? v(val) : v;
+    setVal(next);
+    try { localStorage.setItem(key, JSON.stringify(next)); } catch {}
+    return next;
+  }, [key, val]);
+
+  return [val, save];
+}
+
+export default function App() {
+  const [users, saveUsers] = useStorage("ch_users", DEMO_USERS);
+  const [records, saveRecords] = useStorage("ch_records", []);
+  const [absences, saveAbsences] = useStorage("ch_absences", []);
+  const [session, setSession] = useState(null);
+  const [view, setView] = useState("login");
+  const [loginForm, setLoginForm] = useState({ email: "", password: "", error: "" });
+  const [tab, setTab] = useState("fichar");
+  const [geoStatus, setGeoStatus] = useState("");
+  const [absForm, setAbsForm] = useState({ type: ABSENCE_TYPES[0], start: todayStr(), end: todayStr(), note: "" });
+  const [newUser, setNewUser] = useState({ name: "", email: "", password: "", role: ROLES.WORKER });
+  const [filterUser, setFilterUser] = useState("all");
+  const [filterMonth, setFilterMonth] = useState(new Date().toISOString().slice(0, 7));
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const interval = setInterval(() => setTick(t => t + 1), 30000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const todayRecord = session ? records.find(r => r.userId === session.id && r.date === todayStr()) : null;
+  const isClockedIn = todayRecord && todayRecord.start && !todayRecord.end;
+
+  const getLocation = () => new Promise((res, rej) => {
+    if (!navigator.geolocation) return rej("No disponible");
+    navigator.geolocation.getCurrentPosition(
+      p => res({ lat: p.coords.latitude.toFixed(5), lng: p.coords.longitude.toFixed(5) }),
+      () => rej("Permiso denegado")
+    );
+  });
+
+  const handleLogin = () => {
+    const u = users.find(u => u.email === loginForm.email && u.password === loginForm.password);
+    if (!u) return setLoginForm(f => ({ ...f, error: "Email o contraseña incorrectos" }));
+    setSession(u);
+    setView("app");
+    setTab(u.role === ROLES.ADMIN ? "dashboard" : "fichar");
+  };
+
+  const handleClockIn = async () => {
+    setGeoStatus("Obteniendo ubicación...");
+    let loc = null;
+    try { loc = await getLocation(); setGeoStatus(`📍 ${loc.lat}, ${loc.lng}`); }
+    catch (e) { setGeoStatus("⚠️ Sin geolocalización"); }
+    const rec = { id: Date.now().toString(), userId: session.id, date: todayStr(), start: new Date().toISOString(), end: null, startLoc: loc, endLoc: null };
+    saveRecords(r => [...r, rec]);
+  };
+
+  const handleClockOut = async () => {
+    setGeoStatus("Obteniendo ubicación...");
+    let loc = null;
+    try { loc = await getLocation(); setGeoStatus(`📍 ${loc.lat}, ${loc.lng}`); }
+    catch (e) { setGeoStatus("⚠️ Sin geolocalización"); }
+    saveRecords(r => r.map(rec => rec.id === todayRecord.id ? { ...rec, end: new Date().toISOString(), endLoc: loc } : rec));
+  };
+
+  const handleAbsence = () => {
+    const abs = { id: Date.now().toString(), userId: session.id, ...absForm };
+    saveAbsences(a => [...a, abs]);
+    setAbsForm({ type: ABSENCE_TYPES[0], start: todayStr(), end: todayStr(), note: "" });
+  };
+
+  const handleAddUser = () => {
+    if (!newUser.name || !newUser.email) return;
+    saveUsers(u => [...u, { ...newUser, id: Date.now().toString() }]);
+    setNewUser({ name: "", email: "", password: "", role: ROLES.WORKER });
+  };
+
+  const exportCSV = () => {
+    const filtered = getFilteredRecords();
+    const rows = [["Empleado", "Fecha", "Entrada", "Salida", "Horas", "Loc. Entrada", "Loc. Salida"]];
+    filtered.forEach(r => {
+      const u = users.find(u => u.id === r.userId);
+      const ms = r.end ? new Date(r.end) - new Date(r.start) : null;
+      rows.push([
+        u?.name || r.userId, r.date, fmtTime(r.start), fmtTime(r.end), ms ? fmtHours(ms) : "-",
+        r.startLoc ? `${r.startLoc.lat},${r.startLoc.lng}` : "-",
+        r.endLoc ? `${r.endLoc.lat},${r.endLoc.lng}` : "-"
+      ]);
+    });
+    const csv = rows.map(r => r.join(";")).join("\n");
+    const a = document.createElement("a");
+    a.href = "data:text/csv;charset=utf-8,\uFEFF" + encodeURIComponent(csv);
+    a.download = `fichajes_${filterMonth}.csv`;
+    a.click();
+  };
+
+  const getFilteredRecords = () => records.filter(r => {
+    const matchUser = filterUser === "all" || r.userId === filterUser;
+    const matchMonth = r.date.startsWith(filterMonth);
+    return matchUser && matchMonth;
+  });
+
+  const getWorkerStats = (uid) => {
+    const recs = records.filter(r => r.userId === uid && r.date.startsWith(filterMonth));
+    const total = recs.reduce((acc, r) => acc + (r.end ? new Date(r.end) - new Date(r.start) : 0), 0);
+    return { days: recs.filter(r => r.start).length, hours: total };
+  };
+
+  if (view === "login") return (
+    <div style={styles.loginBg}>
+      <div style={styles.loginCard}>
+        <div style={{ textAlign: "center", marginBottom: 24 }}>
+          <div style={{ fontSize: 40 }}>🕐</div>
+          <h1 style={styles.title}>Control Horario</h1>
+          <p style={styles.subtitle}>Inicia sesión para fichar</p>
+        </div>
+        <input style={styles.input} placeholder="Email" value={loginForm.email}
+          onChange={e => setLoginForm(f => ({ ...f, email: e.target.value }))} />
+        <input type="password" style={styles.input} placeholder="Contraseña" value={loginForm.password}
+          onChange={e => setLoginForm(f => ({ ...f, password: e.target.value }))}
+          onKeyDown={e => e.key === "Enter" && handleLogin()} />
+        {loginForm.error && <p style={{ color: "#ef4444", fontSize: 13, marginBottom: 8 }}>{loginForm.error}</p>}
+        <button onClick={handleLogin} style={styles.btnPrimary}>Entrar</button>
+        <div style={styles.demoBox}>
+          <p style={{ fontWeight: 600, marginBottom: 4 }}>Usuarios demo:</p>
+          <p>admin@empresa.com / admin123</p>
+          <p>carlos@empresa.com / 1234</p>
+        </div>
+      </div>
+    </div>
+  );
+
+  const workerTabs = ["fichar", "mis_registros", "ausencias"];
+  const adminTabs = ["dashboard", "empleados", "registros", "ausencias_admin"];
+  const tabs = session?.role === ROLES.ADMIN ? adminTabs : workerTabs;
+  const tabLabels = {
+    fichar: "📍 Fichar", mis_registros: "📋 Registros", ausencias: "🏖️ Ausencias",
+    dashboard: "📊 Dashboard", empleados: "👥 Empleados", registros: "📋 Registros", ausencias_admin: "🏖️ Ausencias"
+  };
+
+  return (
+    <div style={styles.appWrap}>
+      <div style={styles.header}>
+        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <span style={{ fontSize: 20 }}>🕐</span>
+          <span style={{ fontWeight: 700, fontSize: 15 }}>Control Horario</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <span style={{ fontSize: 12, opacity: 0.8 }}>{session?.name}</span>
+          <button onClick={() => { setSession(null); setView("login"); }} style={styles.btnLogout}>Salir</button>
+        </div>
+      </div>
+
+      <div style={styles.tabBar}>
+        {tabs.map(t => (
+          <button key={t} onClick={() => setTab(t)} style={{ ...styles.tabBtn, ...(tab === t ? styles.tabActive : {}) }}>
+            {tabLabels[t]}
+          </button>
+        ))}
+      </div>
+
+      <div style={styles.content}>
+
+        {tab === "fichar" && (
+          <div>
+            <div style={styles.card}>
+              <p style={{ color: "#64748b", fontSize: 13, textAlign: "center" }}>
+                {new Date().toLocaleDateString("es-ES", { weekday: "long", year: "numeric", month: "long", day: "numeric" })}
+              </p>
+              <p style={{ fontSize: 42, fontWeight: 700, color: "#1e293b", textAlign: "center", margin: "4px 0" }}>
+                {new Date().toLocaleTimeString("es-ES", { hour: "2-digit", minute: "2-digit" })}
+              </p>
+              {todayRecord ? (
+                <div style={{ textAlign: "center", fontSize: 14, color: "#475569" }}>
+                  <p>🟢 Entrada: <strong>{fmtTime(todayRecord.start)}</strong></p>
+                  {todayRecord.startLoc && <p style={{ fontSize: 11, color: "#94a3b8" }}>📍 {todayRecord.startLoc.lat}, {todayRecord.startLoc.lng}</p>}
+                  {todayRecord.end && <>
+                    <p>🔴 Salida: <strong>{fmtTime(todayRecord.end)}</strong></p>
+                    <p style={{ color: "#2563eb", fontWeight: 600 }}>⏱ {fmtHours(new Date(todayRecord.end) - new Date(todayRecord.start))}</p>
+                  </>}
+                </div>
+              ) : <p style={{ color: "#94a3b8", fontSize: 14, textAlign: "center" }}>No has fichado hoy</p>}
+              {geoStatus && <p style={{ color: "#64748b", fontSize: 12, textAlign: "center", marginTop: 8 }}>{geoStatus}</p>}
+              <div style={{ marginTop: 20 }}>
+                {!todayRecord && <button onClick={handleClockIn} style={styles.btnGreen}>▶ ENTRADA</button>}
+                {isClockedIn && <button onClick={handleClockOut} style={styles.btnRed}>⏹ SALIDA</button>}
+                {todayRecord && !isClockedIn && todayRecord.end &&
+                  <div style={{ background: "#f0fdf4", color: "#16a34a", borderRadius: 12, padding: "10px 16px", textAlign: "center", fontSize: 14, fontWeight: 500 }}>✅ Jornada completada</div>}
+              </div>
+            </div>
+
+            <div style={{ ...styles.card, marginTop: 12 }}>
+              <h3 style={styles.sectionTitle}>Esta semana</h3>
+              {(() => {
+                const now = new Date();
+                const day = now.getDay() || 7;
+                return Array.from({ length: 5 }, (_, i) => {
+                  const d = new Date(now); d.setDate(now.getDate() - day + 1 + i);
+                  const date = d.toISOString().split("T")[0];
+                  const r = records.find(r => r.userId === session.id && r.date === date);
+                  const ms = r?.end ? new Date(r.end) - new Date(r.start) : null;
+                  return (
+                    <div key={date} style={{ display: "flex", justifyContent: "space-between", padding: "6px 0", borderBottom: "1px solid #f1f5f9", fontSize: 14 }}>
+                      <span style={{ color: "#475569" }}>{new Date(date + "T12:00:00").toLocaleDateString("es-ES", { weekday: "short", day: "numeric" })}</span>
+                      <span style={{ color: ms ? "#2563eb" : "#cbd5e1", fontWeight: ms ? 600 : 400 }}>{ms ? fmtHours(ms) : "--"}</span>
+                    </div>
+                  );
+                });
+              })()}
+            </div>
+          </div>
+        )}
+
+        {tab === "mis_registros" && (
+          <div style={styles.card}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
+              <h3 style={styles.sectionTitle}>Mis fichajes</h3>
+              <input type="month" style={styles.inputSm} value={filterMonth} onChange={e => setFilterMonth(e.target.value)} />
+            </div>
+            {records.filter(r => r.userId === session.id && r.date.startsWith(filterMonth)).length === 0
+              ? <p style={styles.empty}>Sin registros este mes</p>
+              : records.filter(r => r.userId === session.id && r.date.startsWith(filterMonth)).sort((a, b) => b.date.localeCompare(a.date)).map(r => (
+                <div key={r.id} style={{ borderBottom: "1px solid #f1f5f9", padding: "10px 0" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between" }}>
+                    <span style={{ fontSize: 14, fontWeight: 500, color: "#334155" }}>{fmtDate(r.date)}</span>
+                    <span style={{ fontSize: 12, color: "#2563eb", fontWeight: 600 }}>{r.end ? fmtHours(new Date(r.end) - new Date(r.start)) : "En curso"}</span>
+                  </div>
+                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>▶ {fmtTime(r.start)} &nbsp; ⏹ {fmtTime(r.end)}</div>
+                  {r.startLoc && <p style={{ fontSize: 11, color: "#94a3b8" }}>📍 {r.startLoc.lat}, {r.startLoc.lng}</p>}
+                </div>
+              ))}
+          </div>
+        )}
+
+        {tab === "ausencias" && (
+          <div>
+            <div style={styles.card}>
+              <h3 style={styles.sectionTitle}>Solicitar ausencia</h3>
+              <select style={styles.input} value={absForm.type} onChange={e => setAbsForm(f => ({ ...f, type: e.target.value }))}>
+                {ABSENCE_TYPES.map(t => <option key={t}>{t}</option>)}
+              </select>
+              <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ flex: 1 }}>
+                  <label style={styles.label}>Desde</label>
+                  <input type="date" style={styles.input} value={absForm.start} onChange={e => setAbsForm(f => ({ ...f, start: e.target.value }))} />
+                </div>
+                <div style={{ flex: 1 }}>
+                  <label style={styles.label}>Hasta</label>
+                  <input type="date" style={styles.input} value={absForm.end} onChange={e => setAbsForm(f => ({ ...f, end: e.target.value }))} />
+                </div>
+              </div>
+              <input style={styles.input} placeholder="Nota (opcional)" value={absForm.note} onChange={e => setAbsForm(f => ({ ...f, note: e.target.value }))} />
+              <button onClick={handleAbsence} style={styles.btnPrimary}>Solicitar</button>
+            </div>
+            <div style={{ ...styles.card, marginTop: 12 }}>
+              <h3 style={styles.sectionTitle}>Mis ausencias</h3>
+              {absences.filter(a => a.userId === session.id).length === 0
+                ? <p style={styles.empty}>Sin ausencias registradas</p>
+                : absences.filter(a => a.userId === session.id).sort((a, b) => b.start.localeCompare(a.start)).map(a => (
+                  <div key={a.id} style={{ borderBottom: "1px solid #f1f5f9", padding: "8px 0", fontSize: 14 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontWeight: 500, color: "#334155" }}>{a.type}</span>
+                      <span style={{ fontSize: 12, color: "#64748b" }}>{a.start} → {a.end}</span>
+                    </div>
+                    {a.note && <p style={{ fontSize: 12, color: "#94a3b8" }}>{a.note}</p>}
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "dashboard" && (
+          <div>
+            <input type="month" style={{ ...styles.inputSm, marginBottom: 12 }} value={filterMonth} onChange={e => setFilterMonth(e.target.value)} />
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 10, marginBottom: 12 }}>
+              {[
+                { val: users.filter(u => u.role === ROLES.WORKER).length, label: "Empleados", color: "#2563eb" },
+                { val: records.filter(r => r.date === todayStr()).length, label: "Fichajes hoy", color: "#16a34a" },
+                { val: absences.filter(a => a.start <= todayStr() && a.end >= todayStr()).length, label: "Ausentes hoy", color: "#ea580c" },
+              ].map(({ val, label, color }) => (
+                <div key={label} style={{ ...styles.card, textAlign: "center", padding: 12 }}>
+                  <p style={{ fontSize: 26, fontWeight: 700, color }}>{val}</p>
+                  <p style={{ fontSize: 11, color: "#64748b" }}>{label}</p>
+                </div>
+              ))}
+            </div>
+            {users.filter(u => u.role === ROLES.WORKER).map(u => {
+              const stats = getWorkerStats(u.id);
+              const todayRec = records.find(r => r.userId === u.id && r.date === todayStr());
+              const absent = absences.find(a => a.userId === u.id && a.start <= todayStr() && a.end >= todayStr());
+              const badge = absent ? { bg: "#fff7ed", color: "#ea580c", text: absent.type }
+                : todayRec?.start && !todayRec?.end ? { bg: "#f0fdf4", color: "#16a34a", text: "🟢 Trabajando" }
+                : todayRec?.end ? { bg: "#f8fafc", color: "#64748b", text: "✅ Completado" }
+                : { bg: "#fff1f2", color: "#f87171", text: "⚪ Sin fichar" };
+              return (
+                <div key={u.id} style={{ ...styles.card, marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                      <div style={{ width: 36, height: 36, borderRadius: "50%", background: "#dbeafe", color: "#1d4ed8", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 14 }}>{u.name[0]}</div>
+                      <div>
+                        <p style={{ fontWeight: 600, fontSize: 14, color: "#1e293b" }}>{u.name}</p>
+                        <p style={{ fontSize: 11, color: "#94a3b8" }}>{u.email}</p>
+                      </div>
+                    </div>
+                    <span style={{ fontSize: 11, background: badge.bg, color: badge.color, padding: "2px 8px", borderRadius: 99 }}>{badge.text}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 16, fontSize: 12, color: "#64748b", marginTop: 8, borderTop: "1px solid #f1f5f9", paddingTop: 8 }}>
+                    <span>📅 {stats.days} días</span>
+                    <span>⏱ {fmtHours(stats.hours)}</span>
+                    {todayRec?.start && <span>▶ {fmtTime(todayRec.start)}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {tab === "empleados" && (
+          <div>
+            <div style={styles.card}>
+              <h3 style={styles.sectionTitle}>Añadir empleado</h3>
+              {["name:Nombre completo", "email:Email", "password:Contraseña"].map(f => {
+                const [k, ph] = f.split(":");
+                return <input key={k} style={styles.input} placeholder={ph} value={newUser[k]} onChange={e => setNewUser(u => ({ ...u, [k]: e.target.value }))} />;
+              })}
+              <select style={styles.input} value={newUser.role} onChange={e => setNewUser(u => ({ ...u, role: e.target.value }))}>
+                <option value={ROLES.WORKER}>Trabajador</option>
+                <option value={ROLES.ADMIN}>Administrador</option>
+              </select>
+              <button onClick={handleAddUser} style={styles.btnPrimary}>Añadir</button>
+            </div>
+            <div style={{ ...styles.card, marginTop: 12 }}>
+              <h3 style={styles.sectionTitle}>Empleados ({users.filter(u => u.role === ROLES.WORKER).length})</h3>
+              {users.filter(u => u.role === ROLES.WORKER).map(u => (
+                <div key={u.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0", borderBottom: "1px solid #f1f5f9" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 32, height: 32, borderRadius: "50%", background: "#dbeafe", color: "#1d4ed8", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 700, fontSize: 12 }}>{u.name[0]}</div>
+                    <div>
+                      <p style={{ fontSize: 14, fontWeight: 500, color: "#334155" }}>{u.name}</p>
+                      <p style={{ fontSize: 11, color: "#94a3b8" }}>{u.email}</p>
+                    </div>
+                  </div>
+                  <button onClick={() => saveUsers(us => us.filter(x => x.id !== u.id))} style={{ color: "#f87171", background: "none", border: "none", cursor: "pointer", fontSize: 13 }}>✕ Eliminar</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab === "registros" && (
+          <div style={styles.card}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, justifyContent: "space-between", marginBottom: 12 }}>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <input type="month" style={styles.inputSm} value={filterMonth} onChange={e => setFilterMonth(e.target.value)} />
+                <select style={styles.inputSm} value={filterUser} onChange={e => setFilterUser(e.target.value)}>
+                  <option value="all">Todos</option>
+                  {users.filter(u => u.role === ROLES.WORKER).map(u => <option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+              </div>
+              <button onClick={exportCSV} style={{ background: "#16a34a", color: "#fff", border: "none", borderRadius: 8, padding: "6px 12px", fontSize: 12, cursor: "pointer", fontWeight: 600 }}>⬇ CSV</button>
+            </div>
+            {getFilteredRecords().length === 0
+              ? <p style={styles.empty}>Sin registros</p>
+              : getFilteredRecords().sort((a, b) => b.date.localeCompare(a.date)).map(r => {
+                const u = users.find(u => u.id === r.userId);
+                const ms = r.end ? new Date(r.end) - new Date(r.start) : null;
+                return (
+                  <div key={r.id} style={{ borderBottom: "1px solid #f1f5f9", padding: "10px 0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 14, fontWeight: 500, color: "#334155" }}>{u?.name}</span>
+                      <span style={{ fontSize: 12, color: "#2563eb", fontWeight: 600 }}>{ms ? fmtHours(ms) : "En curso"}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{fmtDate(r.date)} &nbsp; ▶ {fmtTime(r.start)} &nbsp; ⏹ {fmtTime(r.end)}</div>
+                    {r.startLoc && <p style={{ fontSize: 11, color: "#94a3b8" }}>📍 {r.startLoc.lat}, {r.startLoc.lng}</p>}
+                  </div>
+                );
+              })}
+          </div>
+        )}
+
+        {tab === "ausencias_admin" && (
+          <div style={styles.card}>
+            <h3 style={styles.sectionTitle}>Todas las ausencias</h3>
+            {absences.length === 0
+              ? <p style={styles.empty}>Sin ausencias registradas</p>
+              : absences.sort((a, b) => b.start.localeCompare(a.start)).map(a => {
+                const u = users.find(u => u.id === a.userId);
+                return (
+                  <div key={a.id} style={{ borderBottom: "1px solid #f1f5f9", padding: "10px 0" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between" }}>
+                      <span style={{ fontSize: 14, fontWeight: 500, color: "#334155" }}>{u?.name}</span>
+                      <span style={{ fontSize: 11, background: a.type === "Vacaciones" ? "#dbeafe" : "#fff7ed", color: a.type === "Vacaciones" ? "#1d4ed8" : "#ea580c", padding: "2px 8px", borderRadius: 99 }}>{a.type}</span>
+                    </div>
+                    <div style={{ fontSize: 12, color: "#64748b" }}>{a.start} → {a.end}</div>
+                    {a.note && <p style={{ fontSize: 12, color: "#94a3b8" }}>{a.note}</p>}
+                    <button onClick={() => saveAbsences(abs => abs.filter(x => x.id !== a.id))} style={{ color: "#f87171", background: "none", border: "none", cursor: "pointer", fontSize: 12, marginTop: 4 }}>✕ Eliminar</button>
+                  </div>
+                );
+              })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  loginBg: { minHeight: "100vh", background: "linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%)", display: "flex", alignItems: "center", justifyContent: "center", padding: 16 },
+  loginCard: { background: "#fff", borderRadius: 20, boxShadow: "0 20px 60px rgba(0,0,0,0.3)", padding: 32, width: "100%", maxWidth: 360 },
+  title: { fontSize: 24, fontWeight: 700, color: "#1e293b", margin: "4px 0" },
+  subtitle: { fontSize: 13, color: "#64748b", marginTop: 4 },
+  appWrap: { minHeight: "100vh", background: "#f1f5f9", display: "flex", flexDirection: "column" },
+  header: { background: "#1d4ed8", color: "#fff", padding: "12px 16px", display: "flex", alignItems: "center", justifyContent: "space-between", boxShadow: "0 2px 8px rgba(0,0,0,0.2)" },
+  tabBar: { background: "#fff", borderBottom: "1px solid #e2e8f0", display: "flex", overflowX: "auto" },
+  tabBtn: { padding: "12px 16px", fontSize: 12, fontWeight: 500, border: "none", borderBottom: "2px solid transparent", background: "none", cursor: "pointer", color: "#64748b", whiteSpace: "nowrap" },
+  tabActive: { borderBottomColor: "#2563eb", color: "#2563eb" },
+  content: { padding: 16, maxWidth: 600, margin: "0 auto", width: "100%" },
+  card: { background: "#fff", borderRadius: 16, boxShadow: "0 1px 4px rgba(0,0,0,0.08)", padding: 16 },
+  sectionTitle: { fontWeight: 600, color: "#334155", fontSize: 15, margin: "0 0 12px" },
+  input: { width: "100%", border: "1px solid #e2e8f0", borderRadius: 8, padding: "8px 12px", fontSize: 14, marginBottom: 8, boxSizing: "border-box", outline: "none" },
+  inputSm: { border: "1px solid #e2e8f0", borderRadius: 8, padding: "4px 8px", fontSize: 12 },
+  label: { fontSize: 11, color: "#64748b", display: "block", marginBottom: 2 },
+  btnPrimary: { width: "100%", background: "#2563eb", color: "#fff", border: "none", borderRadius: 10, padding: "10px 0", fontSize: 14, fontWeight: 600, cursor: "pointer" },
+  btnGreen: { width: "100%", background: "#22c55e", color: "#fff", border: "none", borderRadius: 16, padding: "16px 0", fontSize: 18, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 12px rgba(34,197,94,0.3)" },
+  btnRed: { width: "100%", background: "#ef4444", color: "#fff", border: "none", borderRadius: 16, padding: "16px 0", fontSize: 18, fontWeight: 700, cursor: "pointer", boxShadow: "0 4px 12px rgba(239,68,68,0.3)" },
+  btnLogout: { background: "#1e40af", color: "#fff", border: "none", borderRadius: 6, padding: "4px 10px", fontSize: 12, cursor: "pointer" },
+  demoBox: { marginTop: 16, background: "#f8fafc", borderRadius: 8, padding: 10, fontSize: 12, color: "#64748b" },
+  empty: { color: "#94a3b8", fontSize: 14, textAlign: "center", padding: "16px 0" },
+};
