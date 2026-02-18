@@ -1,0 +1,363 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width,initial-scale=1"/>
+  <title>Control Horario</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif}
+    body{background:#f1f5f9;min-height:100vh}
+    input,select{outline:none}
+  </style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const {useState,useEffect,useCallback}=React;
+const ROLES={ADMIN:"admin",WORKER:"worker"};
+const ABSENCE_TYPES=["Vacaciones","Baja médica","Asunto personal","Otro"];
+const DEMO_USERS=[
+  {id:"1",name:"Admin",email:"admin@empresa.com",password:"admin123",role:"admin"},
+  {id:"2",name:"Carlos García",email:"carlos@empresa.com",password:"1234",role:"worker"},
+  {id:"3",name:"Laura Martínez",email:"laura@empresa.com",password:"1234",role:"worker"},
+  {id:"4",name:"Pedro Sánchez",email:"pedro@empresa.com",password:"1234",role:"worker"},
+];
+const fmtTime=iso=>iso?new Date(iso).toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"}):"--:--";
+const fmtDate=iso=>iso?new Date(iso).toLocaleDateString("es-ES"):"-";
+const fmtHours=ms=>{if(!ms||ms<0)return"0h 0m";const h=Math.floor(ms/3600000),m=Math.floor((ms%3600000)/60000);return`${h}h ${m}m`};
+const todayStr=()=>new Date().toISOString().split("T")[0];
+
+function useLS(key,init){
+  const[val,setVal]=useState(()=>{try{const s=localStorage.getItem(key);return s?JSON.parse(s):init;}catch{return init;}});
+  const save=useCallback(v=>{const next=typeof v==="function"?v(val):v;setVal(next);try{localStorage.setItem(key,JSON.stringify(next));}catch{}return next;},[key,val]);
+  return[val,save];
+}
+
+function App(){
+  const[users,saveUsers]=useLS("ch_users",DEMO_USERS);
+  const[records,saveRecords]=useLS("ch_records",[]);
+  const[absences,saveAbsences]=useLS("ch_absences",[]);
+  const[session,setSession]=useState(null);
+  const[view,setView]=useState("login");
+  const[loginForm,setLoginForm]=useState({email:"",password:"",error:""});
+  const[tab,setTab]=useState("fichar");
+  const[geoStatus,setGeoStatus]=useState("");
+  const[absForm,setAbsForm]=useState({type:ABSENCE_TYPES[0],start:todayStr(),end:todayStr(),note:""});
+  const[newUser,setNewUser]=useState({name:"",email:"",password:"",role:"worker"});
+  const[filterUser,setFilterUser]=useState("all");
+  const[filterMonth,setFilterMonth]=useState(new Date().toISOString().slice(0,7));
+
+  const todayRecord=session?records.find(r=>r.userId===session.id&&r.date===todayStr()):null;
+  const isClockedIn=todayRecord&&todayRecord.start&&!todayRecord.end;
+
+  const getLocation=()=>new Promise((res,rej)=>{
+    if(!navigator.geolocation)return rej("No disponible");
+    navigator.geolocation.getCurrentPosition(p=>res({lat:p.coords.latitude.toFixed(5),lng:p.coords.longitude.toFixed(5)}),()=>rej("Permiso denegado"));
+  });
+
+  const handleLogin=()=>{
+    const u=users.find(u=>u.email===loginForm.email&&u.password===loginForm.password);
+    if(!u)return setLoginForm(f=>({...f,error:"Email o contraseña incorrectos"}));
+    setSession(u);setView("app");setTab(u.role==="admin"?"dashboard":"fichar");
+  };
+
+  const handleClockIn=async()=>{
+    setGeoStatus("Obteniendo ubicación...");let loc=null;
+    try{loc=await getLocation();setGeoStatus(`📍 ${loc.lat}, ${loc.lng}`);}
+    catch(e){setGeoStatus("⚠️ Sin geolocalización");}
+    saveRecords(r=>[...r,{id:Date.now().toString(),userId:session.id,date:todayStr(),start:new Date().toISOString(),end:null,startLoc:loc,endLoc:null}]);
+  };
+
+  const handleClockOut=async()=>{
+    setGeoStatus("Obteniendo ubicación...");let loc=null;
+    try{loc=await getLocation();setGeoStatus(`📍 ${loc.lat}, ${loc.lng}`);}
+    catch(e){setGeoStatus("⚠️ Sin geolocalización");}
+    saveRecords(r=>r.map(rec=>rec.id===todayRecord.id?{...rec,end:new Date().toISOString(),endLoc:loc}:rec));
+  };
+
+  const handleAbsence=()=>{
+    saveAbsences(a=>[...a,{id:Date.now().toString(),userId:session.id,...absForm}]);
+    setAbsForm({type:ABSENCE_TYPES[0],start:todayStr(),end:todayStr(),note:""});
+  };
+
+  const handleAddUser=()=>{
+    if(!newUser.name||!newUser.email)return;
+    saveUsers(u=>[...u,{...newUser,id:Date.now().toString()}]);
+    setNewUser({name:"",email:"",password:"",role:"worker"});
+  };
+
+  const getFilteredRecords=()=>records.filter(r=>(filterUser==="all"||r.userId===filterUser)&&r.date.startsWith(filterMonth));
+
+  const exportCSV=()=>{
+    const rows=[["Empleado","Fecha","Entrada","Salida","Horas","Loc. Entrada","Loc. Salida"]];
+    getFilteredRecords().forEach(r=>{
+      const u=users.find(u=>u.id===r.userId);
+      const ms=r.end?new Date(r.end)-new Date(r.start):null;
+      rows.push([u?.name||r.userId,r.date,fmtTime(r.start),fmtTime(r.end),ms?fmtHours(ms):"-",r.startLoc?`${r.startLoc.lat},${r.startLoc.lng}`:"-",r.endLoc?`${r.endLoc.lat},${r.endLoc.lng}`:"-"]);
+    });
+    const a=document.createElement("a");
+    a.href="data:text/csv;charset=utf-8,\uFEFF"+encodeURIComponent(rows.map(r=>r.join(";")).join("\n"));
+    a.download=`fichajes_${filterMonth}.csv`;a.click();
+  };
+
+  const getWorkerStats=uid=>{
+    const recs=records.filter(r=>r.userId===uid&&r.date.startsWith(filterMonth));
+    return{days:recs.filter(r=>r.start).length,hours:recs.reduce((acc,r)=>acc+(r.end?new Date(r.end)-new Date(r.start):0),0)};
+  };
+
+  const S={
+    loginBg:{minHeight:"100vh",background:"linear-gradient(135deg,#0f172a,#1e3a8a)",display:"flex",alignItems:"center",justifyContent:"center",padding:16},
+    card:{background:"#fff",borderRadius:16,boxShadow:"0 1px 4px rgba(0,0,0,0.08)",padding:16},
+    input:{width:"100%",border:"1px solid #e2e8f0",borderRadius:8,padding:"8px 12px",fontSize:14,marginBottom:8},
+    inputSm:{border:"1px solid #e2e8f0",borderRadius:8,padding:"4px 8px",fontSize:12},
+    btnP:{width:"100%",background:"#2563eb",color:"#fff",border:"none",borderRadius:10,padding:"10px 0",fontSize:14,fontWeight:600,cursor:"pointer"},
+    btnG:{width:"100%",background:"#22c55e",color:"#fff",border:"none",borderRadius:16,padding:"16px 0",fontSize:18,fontWeight:700,cursor:"pointer"},
+    btnR:{width:"100%",background:"#ef4444",color:"#fff",border:"none",borderRadius:16,padding:"16px 0",fontSize:18,fontWeight:700,cursor:"pointer"},
+    empty:{color:"#94a3b8",fontSize:14,textAlign:"center",padding:"16px 0"},
+    title:{fontWeight:600,color:"#334155",fontSize:15,margin:"0 0 12px"},
+  };
+
+  if(view==="login")return(
+    <div style={S.loginBg}>
+      <div style={{background:"#fff",borderRadius:20,boxShadow:"0 20px 60px rgba(0,0,0,0.3)",padding:32,width:"100%",maxWidth:360}}>
+        <div style={{textAlign:"center",marginBottom:24}}>
+          <div style={{fontSize:40}}>🕐</div>
+          <h1 style={{fontSize:24,fontWeight:700,color:"#1e293b"}}>Control Horario</h1>
+          <p style={{fontSize:13,color:"#64748b",marginTop:4}}>Inicia sesión para fichar</p>
+        </div>
+        <input style={S.input} placeholder="Email" value={loginForm.email} onChange={e=>setLoginForm(f=>({...f,email:e.target.value}))}/>
+        <input type="password" style={S.input} placeholder="Contraseña" value={loginForm.password} onChange={e=>setLoginForm(f=>({...f,password:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&handleLogin()}/>
+        {loginForm.error&&<p style={{color:"#ef4444",fontSize:13,marginBottom:8}}>{loginForm.error}</p>}
+        <button onClick={handleLogin} style={S.btnP}>Entrar</button>
+        <div style={{marginTop:16,background:"#f8fafc",borderRadius:8,padding:10,fontSize:12,color:"#64748b"}}>
+          <p style={{fontWeight:600,marginBottom:4}}>Usuarios demo:</p>
+          <p>admin@empresa.com / admin123</p>
+          <p>carlos@empresa.com / 1234</p>
+        </div>
+      </div>
+    </div>
+  );
+
+  const workerTabs=["fichar","mis_registros","ausencias"];
+  const adminTabs=["dashboard","empleados","registros","ausencias_admin"];
+  const tabs=session?.role==="admin"?adminTabs:workerTabs;
+  const tabLabels={fichar:"📍 Fichar",mis_registros:"📋 Registros",ausencias:"🏖️ Ausencias",dashboard:"📊 Dashboard",empleados:"👥 Empleados",registros:"📋 Registros",ausencias_admin:"🏖️ Ausencias"};
+
+  return(
+    <div style={{minHeight:"100vh",background:"#f1f5f9",display:"flex",flexDirection:"column"}}>
+      <div style={{background:"#1d4ed8",color:"#fff",padding:"12px 16px",display:"flex",alignItems:"center",justifyContent:"space-between"}}>
+        <div style={{display:"flex",alignItems:"center",gap:8}}><span style={{fontSize:20}}>🕐</span><span style={{fontWeight:700,fontSize:15}}>Control Horario</span></div>
+        <div style={{display:"flex",alignItems:"center",gap:12}}>
+          <span style={{fontSize:12,opacity:0.8}}>{session?.name}</span>
+          <button onClick={()=>{setSession(null);setView("login");}} style={{background:"#1e40af",color:"#fff",border:"none",borderRadius:6,padding:"4px 10px",fontSize:12,cursor:"pointer"}}>Salir</button>
+        </div>
+      </div>
+      <div style={{background:"#fff",borderBottom:"1px solid #e2e8f0",display:"flex",overflowX:"auto"}}>
+        {tabs.map(t=>(
+          <button key={t} onClick={()=>setTab(t)} style={{padding:"12px 16px",fontSize:12,fontWeight:500,border:"none",borderBottom:tab===t?"2px solid #2563eb":"2px solid transparent",background:"none",cursor:"pointer",color:tab===t?"#2563eb":"#64748b",whiteSpace:"nowrap"}}>
+            {tabLabels[t]}
+          </button>
+        ))}
+      </div>
+      <div style={{padding:16,maxWidth:600,margin:"0 auto",width:"100%"}}>
+
+        {tab==="fichar"&&(
+          <div>
+            <div style={{...S.card,textAlign:"center"}}>
+              <p style={{color:"#64748b",fontSize:13}}>{new Date().toLocaleDateString("es-ES",{weekday:"long",year:"numeric",month:"long",day:"numeric"})}</p>
+              <p style={{fontSize:42,fontWeight:700,color:"#1e293b",margin:"4px 0"}}>{new Date().toLocaleTimeString("es-ES",{hour:"2-digit",minute:"2-digit"})}</p>
+              {todayRecord?(
+                <div style={{fontSize:14,color:"#475569"}}>
+                  <p>🟢 Entrada: <strong>{fmtTime(todayRecord.start)}</strong></p>
+                  {todayRecord.startLoc&&<p style={{fontSize:11,color:"#94a3b8"}}>📍 {todayRecord.startLoc.lat}, {todayRecord.startLoc.lng}</p>}
+                  {todayRecord.end&&<><p>🔴 Salida: <strong>{fmtTime(todayRecord.end)}</strong></p><p style={{color:"#2563eb",fontWeight:600}}>⏱ {fmtHours(new Date(todayRecord.end)-new Date(todayRecord.start))}</p></>}
+                </div>
+              ):<p style={{color:"#94a3b8",fontSize:14}}>No has fichado hoy</p>}
+              {geoStatus&&<p style={{color:"#64748b",fontSize:12,marginTop:8}}>{geoStatus}</p>}
+              <div style={{marginTop:20}}>
+                {!todayRecord&&<button onClick={handleClockIn} style={S.btnG}>▶ ENTRADA</button>}
+                {isClockedIn&&<button onClick={handleClockOut} style={S.btnR}>⏹ SALIDA</button>}
+                {todayRecord&&!isClockedIn&&todayRecord.end&&<div style={{background:"#f0fdf4",color:"#16a34a",borderRadius:12,padding:"10px 16px",fontSize:14,fontWeight:500}}>✅ Jornada completada</div>}
+              </div>
+            </div>
+            <div style={{...S.card,marginTop:12}}>
+              <h3 style={S.title}>Esta semana</h3>
+              {(()=>{
+                const now=new Date(),day=now.getDay()||7;
+                return Array.from({length:5},(_,i)=>{
+                  const d=new Date(now);d.setDate(now.getDate()-day+1+i);
+                  const date=d.toISOString().split("T")[0];
+                  const r=records.find(r=>r.userId===session.id&&r.date===date);
+                  const ms=r?.end?new Date(r.end)-new Date(r.start):null;
+                  return(<div key={date} style={{display:"flex",justifyContent:"space-between",padding:"6px 0",borderBottom:"1px solid #f1f5f9",fontSize:14}}>
+                    <span style={{color:"#475569"}}>{new Date(date+"T12:00:00").toLocaleDateString("es-ES",{weekday:"short",day:"numeric"})}</span>
+                    <span style={{color:ms?"#2563eb":"#cbd5e1",fontWeight:ms?600:400}}>{ms?fmtHours(ms):"--"}</span>
+                  </div>);
+                });
+              })()}
+            </div>
+          </div>
+        )}
+
+        {tab==="mis_registros"&&(
+          <div style={S.card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+              <h3 style={S.title}>Mis fichajes</h3>
+              <input type="month" style={S.inputSm} value={filterMonth} onChange={e=>setFilterMonth(e.target.value)}/>
+            </div>
+            {records.filter(r=>r.userId===session.id&&r.date.startsWith(filterMonth)).length===0
+              ?<p style={S.empty}>Sin registros este mes</p>
+              :records.filter(r=>r.userId===session.id&&r.date.startsWith(filterMonth)).sort((a,b)=>b.date.localeCompare(a.date)).map(r=>(
+                <div key={r.id} style={{borderBottom:"1px solid #f1f5f9",padding:"10px 0"}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{fontSize:14,fontWeight:500,color:"#334155"}}>{fmtDate(r.date)}</span>
+                    <span style={{fontSize:12,color:"#2563eb",fontWeight:600}}>{r.end?fmtHours(new Date(r.end)-new Date(r.start)):"En curso"}</span>
+                  </div>
+                  <div style={{fontSize:12,color:"#64748b"}}>▶ {fmtTime(r.start)} &nbsp; ⏹ {fmtTime(r.end)}</div>
+                  {r.startLoc&&<p style={{fontSize:11,color:"#94a3b8"}}>📍 {r.startLoc.lat}, {r.startLoc.lng}</p>}
+                </div>
+              ))}
+          </div>
+        )}
+
+        {tab==="ausencias"&&(
+          <div>
+            <div style={S.card}>
+              <h3 style={S.title}>Solicitar ausencia</h3>
+              <select style={S.input} value={absForm.type} onChange={e=>setAbsForm(f=>({...f,type:e.target.value}))}>
+                {ABSENCE_TYPES.map(t=><option key={t}>{t}</option>)}
+              </select>
+              <div style={{display:"flex",gap:8}}>
+                <div style={{flex:1}}><label style={{fontSize:11,color:"#64748b",display:"block",marginBottom:2}}>Desde</label><input type="date" style={S.input} value={absForm.start} onChange={e=>setAbsForm(f=>({...f,start:e.target.value}))}/></div>
+                <div style={{flex:1}}><label style={{fontSize:11,color:"#64748b",display:"block",marginBottom:2}}>Hasta</label><input type="date" style={S.input} value={absForm.end} onChange={e=>setAbsForm(f=>({...f,end:e.target.value}))}/></div>
+              </div>
+              <input style={S.input} placeholder="Nota (opcional)" value={absForm.note} onChange={e=>setAbsForm(f=>({...f,note:e.target.value}))}/>
+              <button onClick={handleAbsence} style={S.btnP}>Solicitar</button>
+            </div>
+            <div style={{...S.card,marginTop:12}}>
+              <h3 style={S.title}>Mis ausencias</h3>
+              {absences.filter(a=>a.userId===session.id).length===0?<p style={S.empty}>Sin ausencias</p>
+                :absences.filter(a=>a.userId===session.id).sort((a,b)=>b.start.localeCompare(a.start)).map(a=>(
+                  <div key={a.id} style={{borderBottom:"1px solid #f1f5f9",padding:"8px 0",fontSize:14}}>
+                    <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontWeight:500}}>{a.type}</span><span style={{fontSize:12,color:"#64748b"}}>{a.start} → {a.end}</span></div>
+                    {a.note&&<p style={{fontSize:12,color:"#94a3b8"}}>{a.note}</p>}
+                  </div>
+                ))}
+            </div>
+          </div>
+        )}
+
+        {tab==="dashboard"&&(
+          <div>
+            <input type="month" style={{...S.inputSm,marginBottom:12}} value={filterMonth} onChange={e=>setFilterMonth(e.target.value)}/>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(3,1fr)",gap:10,marginBottom:12}}>
+              {[{val:users.filter(u=>u.role==="worker").length,label:"Empleados",color:"#2563eb"},{val:records.filter(r=>r.date===todayStr()).length,label:"Fichajes hoy",color:"#16a34a"},{val:absences.filter(a=>a.start<=todayStr()&&a.end>=todayStr()).length,label:"Ausentes hoy",color:"#ea580c"}].map(({val,label,color})=>(
+                <div key={label} style={{...S.card,textAlign:"center",padding:12}}><p style={{fontSize:26,fontWeight:700,color}}>{val}</p><p style={{fontSize:11,color:"#64748b"}}>{label}</p></div>
+              ))}
+            </div>
+            {users.filter(u=>u.role==="worker").map(u=>{
+              const stats=getWorkerStats(u.id);
+              const tr=records.find(r=>r.userId===u.id&&r.date===todayStr());
+              const ab=absences.find(a=>a.userId===u.id&&a.start<=todayStr()&&a.end>=todayStr());
+              const badge=ab?{bg:"#fff7ed",c:"#ea580c",t:ab.type}:tr?.start&&!tr?.end?{bg:"#f0fdf4",c:"#16a34a",t:"🟢 Trabajando"}:tr?.end?{bg:"#f8fafc",c:"#64748b",t:"✅ Completado"}:{bg:"#fff1f2",c:"#f87171",t:"⚪ Sin fichar"};
+              return(
+                <div key={u.id} style={{...S.card,marginBottom:10}}>
+                  <div style={{display:"flex",justifyContent:"space-between",alignItems:"center"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:10}}>
+                      <div style={{width:36,height:36,borderRadius:"50%",background:"#dbeafe",color:"#1d4ed8",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:14}}>{u.name[0]}</div>
+                      <div><p style={{fontWeight:600,fontSize:14,color:"#1e293b"}}>{u.name}</p><p style={{fontSize:11,color:"#94a3b8"}}>{u.email}</p></div>
+                    </div>
+                    <span style={{fontSize:11,background:badge.bg,color:badge.c,padding:"2px 8px",borderRadius:99}}>{badge.t}</span>
+                  </div>
+                  <div style={{display:"flex",gap:16,fontSize:12,color:"#64748b",marginTop:8,borderTop:"1px solid #f1f5f9",paddingTop:8}}>
+                    <span>📅 {stats.days} días</span><span>⏱ {fmtHours(stats.hours)}</span>
+                    {tr?.start&&<span>▶ {fmtTime(tr.start)}</span>}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {tab==="empleados"&&(
+          <div>
+            <div style={S.card}>
+              <h3 style={S.title}>Añadir empleado</h3>
+              {[["name","Nombre completo"],["email","Email"],["password","Contraseña"]].map(([k,ph])=>(
+                <input key={k} style={S.input} placeholder={ph} value={newUser[k]} onChange={e=>setNewUser(u=>({...u,[k]:e.target.value}))}/>
+              ))}
+              <select style={S.input} value={newUser.role} onChange={e=>setNewUser(u=>({...u,role:e.target.value}))}>
+                <option value="worker">Trabajador</option><option value="admin">Administrador</option>
+              </select>
+              <button onClick={handleAddUser} style={S.btnP}>Añadir</button>
+            </div>
+            <div style={{...S.card,marginTop:12}}>
+              <h3 style={S.title}>Empleados ({users.filter(u=>u.role==="worker").length})</h3>
+              {users.filter(u=>u.role==="worker").map(u=>(
+                <div key={u.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #f1f5f9"}}>
+                  <div style={{display:"flex",alignItems:"center",gap:10}}>
+                    <div style={{width:32,height:32,borderRadius:"50%",background:"#dbeafe",color:"#1d4ed8",display:"flex",alignItems:"center",justifyContent:"center",fontWeight:700,fontSize:12}}>{u.name[0]}</div>
+                    <div><p style={{fontSize:14,fontWeight:500,color:"#334155"}}>{u.name}</p><p style={{fontSize:11,color:"#94a3b8"}}>{u.email}</p></div>
+                  </div>
+                  <button onClick={()=>saveUsers(us=>us.filter(x=>x.id!==u.id))} style={{color:"#f87171",background:"none",border:"none",cursor:"pointer",fontSize:13}}>✕ Eliminar</button>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {tab==="registros"&&(
+          <div style={S.card}>
+            <div style={{display:"flex",flexWrap:"wrap",gap:8,justifyContent:"space-between",marginBottom:12}}>
+              <div style={{display:"flex",gap:8}}>
+                <input type="month" style={S.inputSm} value={filterMonth} onChange={e=>setFilterMonth(e.target.value)}/>
+                <select style={S.inputSm} value={filterUser} onChange={e=>setFilterUser(e.target.value)}>
+                  <option value="all">Todos</option>
+                  {users.filter(u=>u.role==="worker").map(u=><option key={u.id} value={u.id}>{u.name}</option>)}
+                </select>
+              </div>
+              <button onClick={exportCSV} style={{background:"#16a34a",color:"#fff",border:"none",borderRadius:8,padding:"6px 12px",fontSize:12,cursor:"pointer",fontWeight:600}}>⬇ CSV</button>
+            </div>
+            {getFilteredRecords().length===0?<p style={S.empty}>Sin registros</p>
+              :getFilteredRecords().sort((a,b)=>b.date.localeCompare(a.date)).map(r=>{
+                const u=users.find(u=>u.id===r.userId);
+                const ms=r.end?new Date(r.end)-new Date(r.start):null;
+                return(<div key={r.id} style={{borderBottom:"1px solid #f1f5f9",padding:"10px 0"}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}><span style={{fontSize:14,fontWeight:500,color:"#334155"}}>{u?.name}</span><span style={{fontSize:12,color:"#2563eb",fontWeight:600}}>{ms?fmtHours(ms):"En curso"}</span></div>
+                  <div style={{fontSize:12,color:"#64748b"}}>{fmtDate(r.date)} &nbsp; ▶ {fmtTime(r.start)} &nbsp; ⏹ {fmtTime(r.end)}</div>
+                  {r.startLoc&&<p style={{fontSize:11,color:"#94a3b8"}}>📍 {r.startLoc.lat}, {r.startLoc.lng}</p>}
+                </div>);
+              })}
+          </div>
+        )}
+
+        {tab==="ausencias_admin"&&(
+          <div style={S.card}>
+            <h3 style={S.title}>Todas las ausencias</h3>
+            {absences.length===0?<p style={S.empty}>Sin ausencias registradas</p>
+              :absences.sort((a,b)=>b.start.localeCompare(a.start)).map(a=>{
+                const u=users.find(u=>u.id===a.userId);
+                return(<div key={a.id} style={{borderBottom:"1px solid #f1f5f9",padding:"10px 0"}}>
+                  <div style={{display:"flex",justifyContent:"space-between"}}>
+                    <span style={{fontSize:14,fontWeight:500,color:"#334155"}}>{u?.name}</span>
+                    <span style={{fontSize:11,background:a.type==="Vacaciones"?"#dbeafe":"#fff7ed",color:a.type==="Vacaciones"?"#1d4ed8":"#ea580c",padding:"2px 8px",borderRadius:99}}>{a.type}</span>
+                  </div>
+                  <div style={{fontSize:12,color:"#64748b"}}>{a.start} → {a.end}</div>
+                  {a.note&&<p style={{fontSize:12,color:"#94a3b8"}}>{a.note}</p>}
+                  <button onClick={()=>saveAbsences(abs=>abs.filter(x=>x.id!==a.id))} style={{color:"#f87171",background:"none",border:"none",cursor:"pointer",fontSize:12,marginTop:4}}>✕ Eliminar</button>
+                </div>);
+              })}
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
+</script>
+</body>
+</html>
