@@ -35,7 +35,10 @@ const fmtHours=ms=>{if(!ms||ms<0)return"0h 0m";const h=Math.floor(ms/3600000),m=
 const todayStr=()=>new Date().toISOString().split("T")[0];
 
 function useLS(key,init){
-  const[val,setVal]=useState(()=>{try{const s=localStorage.getItem(key);return s?JSON.parse(s):init;}catch{return init;}});
+  const[val,setVal]=useState(()=>{
+    if(key==="ch_users")return init;
+    try{const s=localStorage.getItem(key);return s?JSON.parse(s):init;}catch{return init;}
+  });
   const save=useCallback(v=>{const next=typeof v==="function"?v(val):v;setVal(next);try{localStorage.setItem(key,JSON.stringify(next));}catch{}return next;},[key,val]);
   return[val,save];
 }
@@ -366,4 +369,5 @@ ReactDOM.createRoot(document.getElementById("root")).render(<App/>);
 </body>
 
 </html>
+
 
